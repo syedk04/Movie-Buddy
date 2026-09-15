@@ -10,23 +10,32 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.ws.rs.client.Client;
 import javax.ws.rs.client.ClientBuilder;
+import javax.ws.rs.client.Entity;
 import javax.ws.rs.client.WebTarget;
+import javax.ws.rs.core.Form;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 import javax.xml.bind.Unmarshaller;
 import org.apache.commons.io.IOUtils;
-import javax.ws.rs.client.Entity;
-import javax.ws.rs.core.Form;
 
 public class Business {
 
+    private static final Logger logger = Logger.getLogger(Business.class.getName());
     private static final Authenticate auth = new Authenticate();
 
+    /**
+     * Authenticates a user. Supports both hashed (new) and plaintext (legacy) passwords
+     * to allow a seamless migration path.
+     */
     public static String authenticate(String username, String password) {
+        if (isBlank(username) || isBlank(password)) return null;
+
         String query = "SELECT Password FROM Users WHERE Username = ?";
         try (Connection conn = DBConfig.getCon();
              PreparedStatement stmt = conn.prepareStatement(query)) {
@@ -34,175 +43,226 @@ public class Business {
             ResultSet rs = stmt.executeQuery();
 
             if (rs.next()) {
-                String storedPassword = rs.getString("Password");
-                // Compare the provided password with the stored hashed password
-                if (password.equals(storedPassword)) { // Replace with proper password hashing logic
-                    // Generate a JWT for the authenticated user
-                    return auth.createJWT("FrontEnd", username, 86400000); // 24 hours
+                String stored = rs.getString("Password");
+                boolean match = PasswordUtil.verify(password, stored)   // hashed
+                             || password.equals(stored);                  // legacy plaintext
+                if (match) {
+                    return auth.createJWT("FrontEnd", username, 86400000L); // 24 hours
                 }
             }
         } catch (SQLException e) {
-            e.printStackTrace();
+            logger.log(Level.WARNING, "Authentication query failed for user: " + username, e);
         }
-        return null; // Authentication failed
+        return null;
     }
 
+    /**
+     * Registers a new user with a hashed password.
+     */
     public static boolean registerUser(String username, String password, String email) {
+        if (isBlank(username) || isBlank(password) || isBlank(email)) return false;
+
         String query = "INSERT INTO Users (Username, Password, Email) VALUES (?, ?, ?)";
         try (Connection conn = DBConfig.getCon();
              PreparedStatement stmt = conn.prepareStatement(query)) {
             stmt.setString(1, username);
-            stmt.setString(2, password); // Store hashed password in production
+            stmt.setString(2, PasswordUtil.hash(password));
             stmt.setString(3, email);
-            int rowsInserted = stmt.executeUpdate();
-            return rowsInserted > 0;
+            return stmt.executeUpdate() > 0;
         } catch (SQLException e) {
-            e.printStackTrace();
+            logger.log(Level.WARNING, "Registration failed for user: " + username, e);
             return false;
         }
     }
 
+    /**
+     * Retrieves all movies for the given user email via the AddService.
+     */
     public static AddedMoviesXML getMovies(String token, String email) throws IOException {
-    // Validate the JWT token
-    try {
-        if (!auth.verify(token).getKey()) {
-            System.out.println("Token verification failed");
-            throw new SecurityException("Invalid or expired token");
-        }
-        System.out.println("Token verified successfully");
-        
-        // Call AddService to fetch the list of movies
-        Client client = ClientBuilder.newClient();
+        verifyToken(token);
         String addService = System.getenv("addService");
-        WebTarget target = client.target("http://"+addService+"/AddService/webresources/movies/user")
-                .queryParam("email", email); // Add the email as a query parameter
-        
-        System.out.println("Calling AddService with email: " + email);
-        
-        Response response = target.request(MediaType.APPLICATION_XML)
-                .header("Authorization", "Bearer " + token) // Pass the JWT in the request header
-                .get();
-        
-        System.out.println("AddService response status: " + response.getStatus());
-        
-        if (response.getStatus() == 200) {
-            InputStream is = response.readEntity(InputStream.class);
-            String xml = IOUtils.toString(is, "utf-8");
-            
-            System.out.println("Received XML: " + xml);
-            
-            if (xml == null || xml.trim().isEmpty()) {
-                System.out.println("Empty XML response");
-                return new AddedMoviesXML(); // Return empty object instead of null
-            }
-            
-            return parseMoviesXML(xml);
-        } else {
-            System.out.println("Failed to fetch movies. HTTP Status: " + response.getStatus());
-            throw new RuntimeException("Failed to fetch movies. HTTP Status: " + response.getStatus());
-        }
-    } catch (Exception e) {
-        System.out.println("Error in getMovies: " + e.getMessage());
-        e.printStackTrace();
-        throw new RuntimeException("Error fetching movies: " + e.getMessage(), e);
+        WebTarget target = buildClient()
+                .target("http://" + addService + "/AddService/webresources/movies/user")
+                .queryParam("email", email);
+        return fetchMoviesXml(target, token);
     }
-}
-    
+
+    /**
+     * Searches movies for a user with optional filters.
+     */
+    public static AddedMoviesXML searchMovies(
+            String token, String email,
+            String titleFilter, String genreFilter, String directorFilter) throws IOException {
+        verifyToken(token);
+        String addService = System.getenv("addService");
+        WebTarget target = buildClient()
+                .target("http://" + addService + "/AddService/webresources/movies/search")
+                .queryParam("email", email);
+        if (!isBlank(titleFilter))    target = target.queryParam("title", titleFilter);
+        if (!isBlank(genreFilter))    target = target.queryParam("genre", genreFilter);
+        if (!isBlank(directorFilter)) target = target.queryParam("director", directorFilter);
+        return fetchMoviesXml(target, token);
+    }
+
+    public static boolean addMovie(String token, String title, String genre, String director, String email) {
+        try {
+            verifyToken(token);
+            String addService = System.getenv("addService");
+            WebTarget target = buildClient()
+                    .target("http://" + addService + "/AddService/webresources/movies/add");
+
+            Form form = new Form();
+            form.param("title", title);
+            form.param("genre", genre);
+            form.param("director", director);
+            form.param("email", email);
+
+            Response response = target.request()
+                    .header("Authorization", "Bearer " + token)
+                    .post(Entity.entity(form, MediaType.APPLICATION_FORM_URLENCODED_TYPE));
+
+            return response.getStatus() == 200 || response.getStatus() == 201;
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "addMovie failed for email: " + email, e);
+            return false;
+        }
+    }
+
+    /**
+     * Updates a movie's details via the AddService.
+     * Only succeeds if the authenticated user owns the movie.
+     */
+    public static boolean updateMovie(String token, int movieId, String title, String genre,
+                                      String director, String email) {
+        try {
+            verifyToken(token);
+            String addService = System.getenv("addService");
+            WebTarget target = buildClient()
+                    .target("http://" + addService + "/AddService/webresources/movies/update/" + movieId);
+
+            Form form = new Form();
+            form.param("title", title);
+            form.param("genre", genre);
+            form.param("director", director);
+            form.param("email", email);
+
+            Response response = target.request()
+                    .header("Authorization", "Bearer " + token)
+                    .post(Entity.entity(form, MediaType.APPLICATION_FORM_URLENCODED_TYPE));
+
+            return response.getStatus() == 200;
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "updateMovie failed for movieId: " + movieId, e);
+            return false;
+        }
+    }
+
+    /**
+     * Rates a movie from 1 to 5 stars via the AddService.
+     * Only succeeds if the authenticated user owns the movie.
+     */
+    public static boolean rateMovie(String token, int movieId, int rating, String email) {
+        try {
+            verifyToken(token);
+            if (rating < 1 || rating > 5) return false;
+
+            String addService = System.getenv("addService");
+            WebTarget target = buildClient()
+                    .target("http://" + addService + "/AddService/webresources/movies/rate/" + movieId);
+
+            Form form = new Form();
+            form.param("rating", String.valueOf(rating));
+            form.param("email", email);
+
+            Response response = target.request()
+                    .header("Authorization", "Bearer " + token)
+                    .post(Entity.entity(form, MediaType.APPLICATION_FORM_URLENCODED_TYPE));
+
+            return response.getStatus() == 200;
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "rateMovie failed for movieId: " + movieId, e);
+            return false;
+        }
+    }
+
+    public static boolean deleteMovie(String token, String movieId, String email) {
+        try {
+            verifyToken(token);
+            String deleteService = System.getenv("deleteService");
+            WebTarget target = buildClient()
+                    .target("http://" + deleteService + "/DeleteMovie/webresources/delete/"
+                            + movieId + "/" + email);
+
+            Response response = target.request(MediaType.APPLICATION_XML)
+                    .header("Authorization", "Bearer " + token)
+                    .post(Entity.text(""));
+
+            return response.getStatus() == 200;
+        } catch (Exception e) {
+            logger.log(Level.WARNING, "deleteMovie failed for movieId: " + movieId, e);
+            return false;
+        }
+    }
+
+    public static int getUserIdByEmail(String email) {
+        String query = "SELECT UserID FROM Users WHERE Email = ?";
+        try (Connection conn = DBConfig.getCon();
+             PreparedStatement stmt = conn.prepareStatement(query)) {
+            stmt.setString(1, email);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) return rs.getInt("UserID");
+        } catch (SQLException e) {
+            logger.log(Level.WARNING, "getUserIdByEmail failed for: " + email, e);
+        }
+        return -1;
+    }
+
+    // ---- helpers ----
+
+    private static void verifyToken(String token) {
+        try {
+            if (!auth.verify(token).getKey()) {
+                throw new SecurityException("Invalid or expired JWT token");
+            }
+        } catch (java.io.UnsupportedEncodingException e) {
+            throw new SecurityException("Token verification error", e);
+        }
+    }
+
+    private static Client buildClient() {
+        return ClientBuilder.newClient();
+    }
+
+    private static AddedMoviesXML fetchMoviesXml(WebTarget target, String token) throws IOException {
+        Response response = target.request(MediaType.APPLICATION_XML)
+                .header("Authorization", "Bearer " + token)
+                .get();
+
+        if (response.getStatus() != 200) {
+            throw new RuntimeException("AddService returned HTTP " + response.getStatus());
+        }
+
+        InputStream is = response.readEntity(InputStream.class);
+        String xml = IOUtils.toString(is, "utf-8");
+
+        if (xml == null || xml.trim().isEmpty() || xml.trim().equals("<movies/>")) {
+            return new AddedMoviesXML();
+        }
+        return parseMoviesXML(xml);
+    }
+
     private static AddedMoviesXML parseMoviesXML(String xml) {
         try {
-            JAXBContext jaxbContext = JAXBContext.newInstance(AddedMoviesXML.class);
-            Unmarshaller unmarshaller = jaxbContext.createUnmarshaller();
-            return (AddedMoviesXML) unmarshaller.unmarshal(new StringReader(xml));
+            JAXBContext ctx = JAXBContext.newInstance(AddedMoviesXML.class);
+            Unmarshaller u = ctx.createUnmarshaller();
+            return (AddedMoviesXML) u.unmarshal(new StringReader(xml));
         } catch (JAXBException e) {
-            e.printStackTrace();
-            return null;
+            logger.log(Level.SEVERE, "Failed to parse movies XML", e);
+            return new AddedMoviesXML();
         }
     }
-    
-   public static boolean addMovie(String token, String title, String genre, String director, String email) {
-    try {
-        // Validate the JWT token
-        if (!auth.verify(token).getKey()) {
-            System.out.println("Token verification failed");
-            throw new SecurityException("Invalid or expired token");
-        }
-        System.out.println("Token verified successfully for adding movie");
-        
-        // Call AddService to add the movie
-        Client client = ClientBuilder.newClient();
-        String addService = System.getenv("addService");
-        WebTarget target = client.target("http://"+addService+"/AddService/webresources/movies/add");
-        
-        // Create form data with email instead of userId
-        Form form = new Form();
-        form.param("title", title);
-        form.param("genre", genre);
-        form.param("director", director);
-        form.param("email", email); // Pass email directly
-        
-        System.out.println("Calling AddService to add movie for email: " + email);
-        
-        Response response = target.request()
-                .header("Authorization", "Bearer " + token)
-                .post(Entity.entity(form, MediaType.APPLICATION_FORM_URLENCODED_TYPE));
-        
-        System.out.println("AddService response status for adding movie: " + response.getStatus());
-        
-        // Return true if the movie was added successfully (status code 200 or 201)
-        return response.getStatus() == 200 || response.getStatus() == 201;
-    } catch (Exception e) {
-        System.out.println("Error in addMovie: " + e.getMessage());
-        e.printStackTrace();
-        return false;
-    }
-}
-    
-    public static int getUserIdByEmail(String email) {
-    String query = "SELECT UserID FROM Users WHERE Email = ?";
-    try (Connection conn = DBConfig.getCon();
-         PreparedStatement stmt = conn.prepareStatement(query)) {
-        stmt.setString(1, email);
-        ResultSet rs = stmt.executeQuery();
 
-        if (rs.next()) {
-            return rs.getInt("UserID");
-        }
-    } catch (SQLException e) {
-        e.printStackTrace();
+    private static boolean isBlank(String s) {
+        return s == null || s.trim().isEmpty();
     }
-    return -1; // User not found}
-    }
-    
-    public static boolean deleteMovie(String token, String movieId, String email) {
-    try {
-        // Validate the JWT token
-        if (!auth.verify(token).getKey()) {
-            System.out.println("Token verification failed");
-            throw new SecurityException("Invalid or expired token");
-        }
-        System.out.println("Token verified successfully for deleting movie");
-        
-        // Call DeleteMovie microservice
-        Client client = ClientBuilder.newClient();
-        String deleteService = System.getenv("deleteService");
-        WebTarget target = client.target("http://"+deleteService+"/DeleteMovie/webresources/delete/" + movieId + "/" + email);
-        
-        System.out.println("Calling DELETE service at: " + target.getUri());
-        
-        Response response = target.request(MediaType.APPLICATION_XML)
-                .header("Authorization", "Bearer " + token)
-                .post(Entity.text(""));
-        
-        System.out.println("DeleteMovie response status: " + response.getStatus());
-        System.out.println("Response: " + response.readEntity(String.class));
-        
-        // Return true if the movie was deleted successfully
-        return response.getStatus() == 200;
-    } catch (Exception e) {
-        System.out.println("Error in deleteMovie: " + e.getMessage());
-        e.printStackTrace();
-        return false;
-    }
-}
-
 }

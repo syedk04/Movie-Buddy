@@ -8,56 +8,34 @@ public class AddedMovies {
     private String title;
     private String genre;
     private String director;
+    private int rating;
     private List<User> users;
 
-    public AddedMovies() {
-    }
+    public AddedMovies() {}
 
     public AddedMovies(int movieID, String title, String genre, String director) {
         this.movieID = movieID;
         this.title = title;
         this.genre = genre;
         this.director = director;
+        this.rating = 0;
     }
 
-    // Getters and setters
-    public int getMovieID() {
-        return movieID;
-    }
+    public int getMovieID() { return movieID; }
+    public void setMovieID(int movieID) { this.movieID = movieID; }
 
-    public void setMovieID(int movieID) {
-        this.movieID = movieID;
-    }
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
 
-    public String getTitle() {
-        return title;
-    }
+    public String getGenre() { return genre; }
+    public void setGenre(String genre) { this.genre = genre; }
 
-    public void setTitle(String title) {
-        this.title = title;
-    }
+    public String getDirector() { return director; }
+    public void setDirector(String director) { this.director = director; }
 
-    public String getGenre() {
-        return genre;
-    }
+    public int getRating() { return rating; }
+    public void setRating(int rating) { this.rating = rating; }
 
-    public void setGenre(String genre) {
-        this.genre = genre;
-    }
-
-    public String getDirector() {
-        return director;
-    }
-
-    public void setDirector(String director) {
-        this.director = director;
-    }
-
-    public List<User> getUsers() {
-        return users;
-    }
-
-    public void setUsers(List<User> users) {
-        this.users = users;
-    }
+    public List<User> getUsers() { return users; }
+    public void setUsers(List<User> users) { this.users = users; }
 }

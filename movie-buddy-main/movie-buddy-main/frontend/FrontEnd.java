@@ -8,6 +8,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.AbstractMap;
 import java.util.Map.Entry;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javax.servlet.RequestDispatcher;
 import javax.servlet.ServletException;
 import javax.servlet.annotation.WebServlet;
@@ -22,169 +24,132 @@ import ryerson.ca.persistence.DBConfig;
 @WebServlet(name = "FrontEnd", urlPatterns = {"/FrontEnd"})
 public class FrontEnd extends HttpServlet {
 
-    private final Authenticate auth = new Authenticate();
-    private final String authenticationCookieName = "login_token";
+    private static final Logger logger = Logger.getLogger(FrontEnd.class.getName());
+    private static final String AUTH_COOKIE = "login_token";
+    private static final int COOKIE_MAX_AGE = 86400; // 24 hours
 
-    /**
-     * Checks if the user is authenticated by validating the JWT token.
-     *
-     * @param request The HTTP request.
-     * @return A Map.Entry containing the token and username if authenticated, or an empty entry if not.
-     */
+    private final Authenticate auth = new Authenticate();
+
     private Entry<String, String> isAuthenticated(HttpServletRequest request) {
         Cookie[] cookies = request.getCookies();
         String token = "";
 
-        // Extract the token from the cookies
         if (cookies != null) {
             for (Cookie cookie : cookies) {
-                if (cookie.getName().equals(authenticationCookieName)) {
+                if (AUTH_COOKIE.equals(cookie.getName())) {
                     token = cookie.getValue();
                     break;
                 }
             }
         }
 
-        // Verify the token
         if (!token.isEmpty()) {
             try {
-                Entry<Boolean, String> verificationResult = auth.verify(token);
-                if (verificationResult.getKey()) {
-                    return new AbstractMap.SimpleEntry<>(token, verificationResult.getValue());
+                Entry<Boolean, String> result = auth.verify(token);
+                if (result.getKey()) {
+                    return new AbstractMap.SimpleEntry<>(token, result.getValue());
                 }
             } catch (UnsupportedEncodingException e) {
-                e.printStackTrace(); // Log the exception
+                logger.log(Level.WARNING, "Token verification error", e);
             }
         }
 
-        // Return an empty entry if the token is invalid or missing
         return new AbstractMap.SimpleEntry<>("", "");
     }
 
-    /**
-     * Processes requests for both HTTP GET and POST methods.
-     *
-     * @param request The HTTP request.
-     * @param response The HTTP response.
-     * @throws ServletException If a servlet-specific error occurs.
-     * @throws IOException If an I/O error occurs.
-     */
     protected void processRequest(HttpServletRequest request, HttpServletResponse response)
-        throws ServletException, IOException {
+            throws ServletException, IOException {
 
-    // Call isAuthenticated once and store both values
-    Entry<String, String> authResult = isAuthenticated(request);
-    String token = authResult.getKey();
-    String username = authResult.getValue();
-    
-    String action = request.getParameter("action");
+        Entry<String, String> authResult = isAuthenticated(request);
+        String token    = authResult.getKey();
+        String username = authResult.getValue();
+        String action   = request.getParameter("action");
 
-    if (action == null) {
-        // Default action: Show login page
-        response.sendRedirect("login.jsp");
-        return;
-    }
-
-    switch (action) {
-        case "login":
-            handleLogin(request, response);
-            break;
-
-        case "movies":
-            handleMovies(request, response, token, username);
-            break;
-
-        default:
-            // Invalid action: Show login page
+        if (action == null) {
             response.sendRedirect("login.jsp");
-            break;
-    }
-}
-
-    /**
-     * Handles the login action.
-     *
-     * @param request The HTTP request.
-     * @param response The HTTP response.
-     * @throws ServletException If a servlet-specific error occurs.
-     * @throws IOException If an I/O error occurs.
-     */
-   private void handleLogin(HttpServletRequest request, HttpServletResponse response)
-        throws ServletException, IOException {
-
-    String username = request.getParameter("username");
-    String password = request.getParameter("password");
-    
-    System.out.println("Login attempt for user: " + username);
-
-    // Authenticate the user
-    String token = Business.authenticate(username, password);
-    System.out.println("Authentication result: " + (token != null ? "Success" : "Failed"));
-    
-    if (token != null) {
-        // Create a cookie with the token
-        Cookie newCookie = new Cookie(authenticationCookieName, token);
-        response.addCookie(newCookie);
-        System.out.println("Added cookie: " + authenticationCookieName + "=" + token);
-
-        // Redirect to the movies action instead of directly to movies.jsp
-        response.sendRedirect("FrontEnd?action=movies&email=" + username);
-    } else {
-        // Authentication failed: Show login page with an error message
-        request.setAttribute("error", "Invalid username or password");
-        RequestDispatcher dispatcher = request.getRequestDispatcher("login.jsp");
-        dispatcher.forward(request, response);
-    }
-}
-
-    /**
-     * Handles the movies action.
-     *
-     * @param request The HTTP request.
-     * @param response The HTTP response.
-     * @param token The JWT token.
-     * @param username The username.
-     * @throws ServletException If a servlet-specific error occurs.
-     * @throws IOException If an I/O error occurs.
-     */
-    private void handleMovies(HttpServletRequest request, HttpServletResponse response, String token, String username)
-        throws ServletException, IOException {
-    if (token.isEmpty()) {
-        // User is not authenticated: Redirect to login page
-        response.sendRedirect("login.jsp");
-        return;
-    }
-    
-    // Look up the user's email based on their username
-    String email = getUserEmailFromDatabase(username);
-    
-    // Now use the correct email
-    AddedMoviesXML moviesXML = Business.getMovies(token, email);
-    
-    
-    request.setAttribute("username", username);
-    request.setAttribute("movies", moviesXML);
-    request.setAttribute("token", token);
-    request.setAttribute("email", email);
-    RequestDispatcher dispatcher = request.getRequestDispatcher("movies.jsp");
-    dispatcher.forward(request, response);
-}
-
-    // New method to get user email
-    private String getUserEmailFromDatabase(String username) {
-        String email = null;
-        String query = "SELECT Email FROM Users WHERE Username = ?";
-        try (Connection conn = DBConfig.getCon();
-             PreparedStatement stmt = conn.prepareStatement(query)) {
-            stmt.setString(1, username);
-            ResultSet rs = stmt.executeQuery();
-            if (rs.next()) {
-                email = rs.getString("Email");
-            }
-        } catch (SQLException e) {
-            e.printStackTrace();
+            return;
         }
-        return email != null ? email : username; // Fallback to username if email not found
+
+        switch (action) {
+            case "login":
+                handleLogin(request, response);
+                break;
+            case "movies":
+                handleMovies(request, response, token, username);
+                break;
+            case "search":
+                handleSearch(request, response, token, username);
+                break;
+            default:
+                response.sendRedirect("login.jsp");
+                break;
+        }
+    }
+
+    private void handleLogin(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+
+        String username = request.getParameter("username");
+        String password = request.getParameter("password");
+
+        String token = Business.authenticate(username, password);
+
+        if (token != null) {
+            Cookie cookie = new Cookie(AUTH_COOKIE, token);
+            cookie.setHttpOnly(true);
+            cookie.setMaxAge(COOKIE_MAX_AGE);
+            cookie.setPath("/");
+            response.addCookie(cookie);
+            response.sendRedirect("FrontEnd?action=movies&email=" + username);
+        } else {
+            request.setAttribute("error", "Invalid username or password");
+            request.getRequestDispatcher("login.jsp").forward(request, response);
+        }
+    }
+
+    private void handleMovies(HttpServletRequest request, HttpServletResponse response,
+                               String token, String username)
+            throws ServletException, IOException {
+
+        if (token.isEmpty()) {
+            response.sendRedirect("login.jsp");
+            return;
+        }
+
+        String email = getUserEmail(username);
+        AddedMoviesXML moviesXML = Business.getMovies(token, email);
+
+        request.setAttribute("username", username);
+        request.setAttribute("movies", moviesXML);
+        request.setAttribute("token", token);
+        request.setAttribute("email", email);
+        request.getRequestDispatcher("movies.jsp").forward(request, response);
+    }
+
+    private void handleSearch(HttpServletRequest request, HttpServletResponse response,
+                               String token, String username)
+            throws ServletException, IOException {
+
+        if (token.isEmpty()) {
+            response.sendRedirect("login.jsp");
+            return;
+        }
+
+        String email          = getUserEmail(username);
+        String titleFilter    = request.getParameter("title");
+        String genreFilter    = request.getParameter("genre");
+        String directorFilter = request.getParameter("director");
+
+        AddedMoviesXML moviesXML = Business.searchMovies(token, email, titleFilter, genreFilter, directorFilter);
+
+        request.setAttribute("username", username);
+        request.setAttribute("movies", moviesXML);
+        request.setAttribute("token", token);
+        request.setAttribute("email", email);
+        request.setAttribute("searchTitle", titleFilter);
+        request.setAttribute("searchGenre", genreFilter);
+        request.setAttribute("searchDirector", directorFilter);
+        request.getRequestDispatcher("movies.jsp").forward(request, response);
     }
 
     @Override
@@ -193,118 +158,170 @@ public class FrontEnd extends HttpServlet {
         processRequest(request, response);
     }
 
-   @Override
+    @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response)
             throws ServletException, IOException {
 
         String uri = request.getRequestURI();
 
         if (uri.contains("/addmovie")) {
-        handleAddMovie(request, response);
-    } else if (uri.contains("/deletemovie")) {
-        System.out.println("Handling delete movie request");
-        handleDeleteMovie(request, response);
-    } else {
-        processRequest(request, response);
-    }    
-    }
-    
-    private void handleAddMovie(HttpServletRequest request, HttpServletResponse response) 
-            throws ServletException, IOException {
-        // Get form parameters
-        String title = request.getParameter("title");
-        String genre = request.getParameter("genre");
-        String director = request.getParameter("director");
-        String email = request.getParameter("email");
-        String token = request.getParameter("token");
-
-        // If token is not in request, try to get from cookie
-        if (token == null || token.isEmpty()) {
-            Cookie[] cookies = request.getCookies();
-            if (cookies != null) {
-                for (Cookie cookie : cookies) {
-                    if (cookie.getName().equals("login_token")) {
-                        token = cookie.getValue();
-                        break;
-                    }
-                }
-            }
+            handleAddMovie(request, response);
+        } else if (uri.contains("/deletemovie")) {
+            handleDeleteMovie(request, response);
+        } else if (uri.contains("/updatemovie")) {
+            handleUpdateMovie(request, response);
+        } else if (uri.contains("/ratemovie")) {
+            handleRateMovie(request, response);
+        } else {
+            processRequest(request, response);
         }
+    }
 
-        // Validate input
-        if (title == null || genre == null || director == null || email == null || token == null ||
-            title.isEmpty() || genre.isEmpty() || director.isEmpty() || email.isEmpty() || token.isEmpty()) {
+    private void handleAddMovie(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+
+        String title    = request.getParameter("title");
+        String genre    = request.getParameter("genre");
+        String director = request.getParameter("director");
+        String email    = request.getParameter("email");
+        String token    = resolveToken(request);
+
+        if (isBlank(title) || isBlank(genre) || isBlank(director) || isBlank(email) || isBlank(token)) {
             request.setAttribute("errorMessage", "All fields are required");
-            RequestDispatcher dispatcher = request.getRequestDispatcher("movies.jsp");
-            dispatcher.forward(request, response);
+            forwardToMovies(request, response, token, email);
             return;
         }
 
-        // Call Business method to add the movie
         boolean success = Business.addMovie(token, title, genre, director, email);
-
-       if (success) {
-        request.setAttribute("successMessage", "Movie added successfully!");
-    } else {
-        request.setAttribute("errorMessage", "Failed to add movie.");
+        request.setAttribute(success ? "successMessage" : "errorMessage",
+                             success ? "Movie added successfully!" : "Failed to add movie.");
+        forwardToMovies(request, response, token, email);
     }
 
-        // Re-set auth data before forwarding
-        request.setAttribute("token", token);           // Preserve token
-        request.setAttribute("email", email);           // Preserve email
+    private void handleDeleteMovie(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
 
-        // Reload movies
-        AddedMoviesXML moviesXML = Business.getMovies(token, email);
-        request.setAttribute("movies", moviesXML);
+        String movieId = request.getParameter("movieId");
+        String email   = request.getParameter("email");
+        String token   = resolveToken(request);
 
-        RequestDispatcher dispatcher = request.getRequestDispatcher("movies.jsp");
-        dispatcher.forward(request, response);
+        if (isBlank(movieId) || isBlank(email) || isBlank(token)) {
+            request.setAttribute("errorMessage", "Invalid delete request");
+            forwardToMovies(request, response, token, email);
+            return;
         }
-    
-    private void handleDeleteMovie(HttpServletRequest request, HttpServletResponse response) 
-        throws ServletException, IOException {
-    String movieId = request.getParameter("movieId");
-    String email = request.getParameter("email");
-    String token = request.getParameter("token");
 
-    // If token is not in request, try to get it from cookies
-    if (token == null || token.isEmpty()) {
-        Cookie[] cookies = request.getCookies();
-        if (cookies != null) {
-            for (Cookie cookie : cookies) {
-                if (cookie.getName().equals("login_token")) {
-                    token = cookie.getValue();
-                    break;
-                }
+        boolean success = Business.deleteMovie(token, movieId, email);
+        request.setAttribute(success ? "successMessage" : "errorMessage",
+                             success ? "Movie deleted successfully!" : "Failed to delete movie.");
+        forwardToMovies(request, response, token, email);
+    }
+
+    private void handleUpdateMovie(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+
+        String movieIdParam = request.getParameter("movieId");
+        String title        = request.getParameter("title");
+        String genre        = request.getParameter("genre");
+        String director     = request.getParameter("director");
+        String email        = request.getParameter("email");
+        String token        = resolveToken(request);
+
+        if (isBlank(movieIdParam) || isBlank(title) || isBlank(genre)
+                || isBlank(director) || isBlank(email) || isBlank(token)) {
+            request.setAttribute("errorMessage", "All fields are required to update a movie");
+            forwardToMovies(request, response, token, email);
+            return;
+        }
+
+        int movieId;
+        try {
+            movieId = Integer.parseInt(movieIdParam);
+        } catch (NumberFormatException e) {
+            request.setAttribute("errorMessage", "Invalid movie ID");
+            forwardToMovies(request, response, token, email);
+            return;
+        }
+
+        boolean success = Business.updateMovie(token, movieId, title, genre, director, email);
+        request.setAttribute(success ? "successMessage" : "errorMessage",
+                             success ? "Movie updated successfully!" : "Failed to update movie.");
+        forwardToMovies(request, response, token, email);
+    }
+
+    private void handleRateMovie(HttpServletRequest request, HttpServletResponse response)
+            throws ServletException, IOException {
+
+        String movieIdParam = request.getParameter("movieId");
+        String ratingParam  = request.getParameter("rating");
+        String email        = request.getParameter("email");
+        String token        = resolveToken(request);
+
+        if (isBlank(movieIdParam) || isBlank(ratingParam) || isBlank(email) || isBlank(token)) {
+            request.setAttribute("errorMessage", "Movie ID, rating, and email are required");
+            forwardToMovies(request, response, token, email);
+            return;
+        }
+
+        int movieId, rating;
+        try {
+            movieId = Integer.parseInt(movieIdParam);
+            rating  = Integer.parseInt(ratingParam);
+        } catch (NumberFormatException e) {
+            request.setAttribute("errorMessage", "Invalid movie ID or rating");
+            forwardToMovies(request, response, token, email);
+            return;
+        }
+
+        boolean success = Business.rateMovie(token, movieId, rating, email);
+        request.setAttribute(success ? "successMessage" : "errorMessage",
+                             success ? "Movie rated successfully!" : "Failed to rate movie. Rating must be 1-5.");
+        forwardToMovies(request, response, token, email);
+    }
+
+    private void forwardToMovies(HttpServletRequest request, HttpServletResponse response,
+                                  String token, String email)
+            throws ServletException, IOException {
+
+        if (!isBlank(token) && !isBlank(email)) {
+            request.setAttribute("token", token);
+            request.setAttribute("email", email);
+            try {
+                AddedMoviesXML moviesXML = Business.getMovies(token, email);
+                request.setAttribute("movies", moviesXML);
+            } catch (Exception e) {
+                logger.log(Level.WARNING, "Could not reload movies after action", e);
             }
         }
+        request.getRequestDispatcher("movies.jsp").forward(request, response);
     }
 
-    if (movieId == null || email == null || token == null || 
-        movieId.isEmpty() || email.isEmpty() || token.isEmpty()) {
-        request.setAttribute("errorMessage", "Invalid delete request");
-        RequestDispatcher dispatcher = request.getRequestDispatcher("movies.jsp");
-        dispatcher.forward(request, response);
-        return;
+    private String getUserEmail(String username) {
+        String query = "SELECT Email FROM Users WHERE Username = ?";
+        try (Connection conn = DBConfig.getCon();
+             PreparedStatement stmt = conn.prepareStatement(query)) {
+            stmt.setString(1, username);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) return rs.getString("Email");
+        } catch (SQLException e) {
+            logger.log(Level.WARNING, "Could not look up email for user: " + username, e);
+        }
+        return username;
     }
 
-    boolean success = Business.deleteMovie(token, movieId, email);
-
-    if (success) {
-        request.setAttribute("successMessage", "Movie deleted successfully!");
-    } else {
-        request.setAttribute("errorMessage", "Failed to delete movie.");
+    private String resolveToken(HttpServletRequest request) {
+        String token = request.getParameter("token");
+        if (!isBlank(token)) return token;
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null) {
+            for (Cookie c : cookies) {
+                if (AUTH_COOKIE.equals(c.getName())) return c.getValue();
+            }
+        }
+        return "";
     }
 
-    // Re-set auth data
-    request.setAttribute("token", token);
-    request.setAttribute("email", email);
-
-    // Reload movies
-    AddedMoviesXML moviesXML = Business.getMovies(token, email);
-    request.setAttribute("movies", moviesXML);
-    
-    RequestDispatcher dispatcher = request.getRequestDispatcher("movies.jsp");
-    dispatcher.forward(request, response);
-}
+    private static boolean isBlank(String s) {
+        return s == null || s.trim().isEmpty();
+    }
 }
